@@ -9,7 +9,7 @@ class SerialConnection:
         self.sr = None
         self.connection_trials = 3
         self.no_data_bytes = None
-        self.last_data = {"position":[0],"current":[0],"power":[0],"day_time":[0],"rain_detection":[0],"motion_detection":[0]}
+        self.last_data = {"position":[0, 0, 0, 0, 0],"current":[0, 0, 0, 0, 0],"power":[0, 0, 0, 0, 0],"day_time":[0, 0, 0, 0, 0],"rain_detection":[0, 0, 0, 0, 0],"motion_detection":[0, 0, 0, 0, 0]}
         self.keys = [x for x in self.last_data]
 
     def start_connection(self):
