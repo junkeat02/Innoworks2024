@@ -1,0 +1,311 @@
+//----------------------------------------------------------------------------
+// Blynk IOT Library and Variables
+#define BLYNK_PRINT Serial
+#define BLYNK_TEMPLATE_ID "TMPLk2tjWNXr"
+#define BLYNK_TEMPLATE_NAME "Streetlight"
+#include <BlynkSimpleEsp32.h>
+char auth[] = "s5feOCooCU6SGHg6LyNvp_wdAGMa5WBs";
+char ssid[] = "WIFI SSID HERE";
+char pass[] = "WIFI PASSWORD HERE";
+
+//----------------------------------------------------------------------------
+// INA219 Current Sensor Library and Variables
+#include <Wire.h>
+#include <Adafruit_INA219.h>
+Adafruit_INA219 ina219;
+
+//----------------------------------------------------------------------------
+// Setting variables. Please set the GPIO pins based on segments needed.
+// n = number of segments
+const int n = 5;
+
+// PIR sensor GPIO pin
+const int sensor[n] = {32, 33, 25, 26, 27};
+
+// led GPIO pin
+const int ledpin[n] = {19, 18, 5, 17, 16};
+
+// Blynk virtual data pin for motionRead (motion detection)
+int recordVpin[n] = {V1, V2, V3, V4, V5};
+
+// Blynk virtual data pin for sensRec (motion record)
+int motionVpin[n] = {V11, V12, V13, V14, V15};
+
+// Blynk virtual data pin for fault checking
+int faultVpin[n] = {V21, V22, V23, V24, V25};
+
+// Blynk virtual data pin for fault test button
+int faultTest = V0;
+
+// Blynk virtual data pin for detection of rain
+int rainVpin = V10;
+
+// Blynk virtual data pin for lamp health count
+int lampHealth = V20;
+
+// Blynk virtual data pin for power 
+int powerVpin = V30;
+
+// indicator that fault test is running
+int testLED = 38;
+
+// Rain sensor
+int rainSens = 39;
+
+// dimming LED brightness when motion is detected
+#define brightLED 255
+
+// dimming LED brightness when no motion detected
+#define dimLED 10
+
+// minimum current for a properly functioning light
+#define properCurrent 30
+
+// timer variable: led bright for brightTime/1000 sec when motion detected
+#define brightTime 5000
+
+//----------------------------------------------------------------------------
+// Fixed variables.
+// one second
+#define oneSec 1000
+
+//  (for loop) variable i, used for array functions
+int i;
+
+// led channel
+int led[n] = {};
+
+// variable to store the sensor status (value)
+int val[n] = {};
+
+// sensor memory: motion detection to be updated on Blynk
+int motionRead[n] = {};
+
+// sensor memory: motion record to be updated on Blynk
+int sensRec[n] = {};
+
+// setting PWM properties
+const int freq = 5000;
+const int resolution = 8;
+
+// timer for main program motionLight
+long prevMillis = 0;
+
+// timer memory to brighten LED when motion detected
+long prevBright [n] = {};
+
+// timer memory to increment sensor memory
+long prevMemory [n] = {};
+
+// timer memory to measure power
+long prevPower;
+
+// initiate timer BlynkTimer variable
+BlynkTimer timer;
+
+// current sensor variables
+float shuntvoltage = 0;
+float busvoltage = 0;
+float current_mA = 0;
+float loadvoltage = 0;
+float power_mW = 0;
+
+// count number of lamps that work properly
+int faultlessCount;
+
+// override normal operations and perform fault checking
+int faultLock;
+
+// subroutine function for fault test
+void faultCheck();
+
+// subroutine function for power measuring
+void measurePower();
+
+//----------------------------------------------------------------------------
+// main function subroutine
+void motionLight()
+{
+// add program for daylight sensor here if required, or else...
+// light is brightened when its motion or neighbouring motion is detected
+// dims lights 5 seconds after motion is absent
+  if (faultLock == 0)
+  {
+    ledcWrite(led[0], brightLED);     // entrace(head) segment
+    ledcWrite(led[n-1], brightLED);   // exit(tail) segment
+    
+    // read all motion sensors
+    for (i = 0; i < n; i++)
+    {
+      val[i] = digitalRead(sensor[i]);
+
+      if (val[i] == HIGH)
+      {
+        motionRead[i] = HIGH;
+
+        if (millis() - prevMemory[i] >= oneSec)
+        {
+          ++sensRec[i];
+          prevMemory[i] = millis();
+        }
+      }
+
+      else
+      { motionRead[i] = LOW;}
+    }
+
+    // if raining, brighten all lamps
+    if (digitalRead(rainSens) == 0)
+    {
+      Blynk.virtualWrite(rainVpin, "Rain"); 
+      for (i = 0; i < n; i++)
+      {ledcWrite(led[i], brightLED);}  // bright all lamp when raining
+    }
+
+    // lighting control if sunny, motion-based lighting
+    else
+    {
+      Blynk.virtualWrite(rainVpin, "Sunny"); 
+      for (i = 1; i < n-1; i++)
+      {
+        if ((val[i-1] == HIGH) || (val[i] == HIGH) || (val[i+1] == HIGH))
+        {
+          ledcWrite(led[i], brightLED);
+          prevBright[i] = millis();
+        }
+
+        if (millis() - prevBright[i] > brightTime)
+        { ledcWrite(led[i], dimLED);}
+      }
+    }
+    
+    if (millis() - prevPower > oneSec)
+    { measurePower();}
+  }
+
+  else
+  { faultCheck();}
+}
+
+//----------------------------------------------------------------------------
+// function to update data on Blynk
+// used in updateMotion() and updateRecord()
+int updateFunction(int BlynkVpin, int dataVar)
+{
+  Blynk.virtualWrite(BlynkVpin, dataVar);
+  return(dataVar = 0);
+}
+
+//----------------------------------------------------------------------------
+// detects for motion and update to Blynk
+void updateMotion()
+{
+  for (i = 0; i < n; i++)
+  { motionRead[i] = updateFunction(motionVpin[i], motionRead[i]);}
+}
+
+//----------------------------------------------------------------------------
+// records the period when motion is present and update to Blynk
+void updateRecord()
+{
+  for (i = 0; i < n; i++)
+  { sensRec[i] = updateFunction(recordVpin[i], sensRec[i]);}
+}
+
+//----------------------------------------------------------------------------
+// check for faulty lamps, off all, on one by one and read from current sensor
+void faultCheck()
+{
+  faultlessCount = 0; // reset value before counting number of good lamps
+  faultLock = 1;      // lock for fault testing, take over motion control
+  digitalWrite(testLED, faultLock); // visual indicator: fault testing is running
+
+  for (i = 0; i < n; i++)
+  { ledcWrite(led[i], 0);}  // switch off all lamps
+
+  for (i = 0; i < n; i++)
+  {
+    ledcWrite(led[i], brightLED);
+    delay(1500);
+
+    shuntvoltage = ina219.getShuntVoltage_mV();
+    busvoltage = ina219.getBusVoltage_V();
+    current_mA = ina219.getCurrent_mA();
+    Blynk.virtualWrite(faultVpin[i], current_mA);
+
+    if (current_mA < properCurrent)
+    { Blynk.logEvent("fault_detected");}
+
+    else
+    { faultlessCount++;}
+
+    ledcWrite(led[i], 0);
+  }
+
+  Blynk.virtualWrite(lampHealth, faultlessCount);
+  faultLock = 0;
+  digitalWrite(testLED, faultLock);
+}
+
+//----------------------------------------------------------------------------
+// run fault test when Blynk virtual button is pressed
+BLYNK_WRITE(V0)
+{
+  if (param.asInt() == 1)
+  { faultLock = 1;}
+}
+
+//----------------------------------------------------------------------------
+// measure power and send to Blynk
+void measurePower()
+{
+  shuntvoltage = ina219.getShuntVoltage_mV();
+  busvoltage = ina219.getBusVoltage_V();
+  current_mA = ina219.getCurrent_mA();
+  power_mW = ina219.getPower_mW();
+  Blynk.virtualWrite(powerVpin, power_mW/1000);
+  prevPower = millis();
+}
+
+//----------------------------------------------------------------------------
+void setup()
+{
+  Serial.begin(115200);
+
+  Blynk.begin(auth, ssid, pass);
+
+  timer.setInterval(200L, motionLight);
+  timer.setInterval(1000L, updateMotion);
+  timer.setInterval(10000L, updateRecord);
+  
+  if (! ina219.begin())
+  { while (1) { delay(10);}}
+
+  ina219.setCalibration_16V_400mA();
+
+  pinMode(rainSens, INPUT_PULLDOWN);
+  pinMode(testLED, OUTPUT);
+
+  digitalWrite(testLED, HIGH);
+  delay(2000);
+  digitalWrite(testLED, LOW);
+
+  for (i = 0; i < n; i++)
+  {
+    led[i] = i+1;
+    // configure LED PWM functionalitites
+    ledcSetup(led[i], freq, resolution);
+    // attach the channel to the GPIO to be controlled
+    ledcAttachPin(ledpin[i], led[i]);
+    // initialize sensor as an input
+    pinMode(sensor[i], INPUT_PULLDOWN);
+  }
+}
+
+//----------------------------------------------------------------------------
+void loop()
+{
+  Blynk.run();
+  timer.run();
+}
+//----------------------------------------------------------------------------
